@@ -49,6 +49,7 @@ import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 
 import regex as re
@@ -115,6 +116,7 @@ def _is_env_assignment(token: str) -> bool:
     return bool(name) and name.replace("_", "").isupper()
 
 
+@cache
 def normalize_test_path(raw: str) -> str:
     """Reduce a path as it appears in a command to one comparable form:
     relative to ``tests/``, no surrounding quotes, no ``::nodeid`` selector, no
@@ -123,6 +125,12 @@ def normalize_test_path(raw: str) -> str:
     Commands run from either the repo root or from ``tests/``, so both a
     ``tests/`` and a ``/vllm-workspace/tests/`` prefix are stripped, as is a
     leading ``$VAR/`` (``"${GIT_ROOT}/tests/..."``).
+
+    A full scan calls this with the same handful of command-line path
+    arguments once per test file in the tree, so memoizing turns an
+    O(selections x test files) re-parse into one parse per distinct argument.
+    Pure function of its string argument - safe to cache for the process
+    lifetime.
     """
     path = raw.strip().strip("'\"")
     path = path.split("::", 1)[0]
@@ -207,9 +215,17 @@ class PytestSelection:
         )
 
     @staticmethod
+    @cache
     def _arg_covers(path_arg: str, test_file: str) -> bool:
         """True if a single pytest path argument selects ``test_file`` - by
-        exact match, by being a parent directory, or as a glob."""
+        exact match, by being a parent directory, or as a glob.
+
+        A full scan calls this once per (argument, test file) pair across
+        every selection, and the same small set of path arguments recurs
+        throughout the pipeline yamls, so memoizing avoids re-normalizing and
+        re-matching an identical pair. Pure function of its two string
+        arguments - safe to cache for the process lifetime.
+        """
         path_arg = normalize_test_path(path_arg)
         if _path_is_within(path_arg, test_file):
             return True
